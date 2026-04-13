@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Betty Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      background: #0b0f1e;
+      color: white;
+      font-family: Arial, sans-serif;
+      display: flex;
+      justify-content: center;
+      padding: 40px;
+      margin: 0;
+    }
+
+    .chat {
+      width: 400px;
+      background: #111827;
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .avatar-wrap {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 20px;
+    }
+
+    .avatar-wrap img {
+      width: 320px;
+      height: 320px;
+      object-fit: cover;
+      display: block;
+    }
+
+    .messages {
+      height: 400px;
+      overflow-y: auto;
+      margin-bottom: 10px;
+      padding-right: 4px;
+    }
+
+    .msg {
+      margin: 8px 0;
+      line-height: 1.4;
+      font-size: 18px;
+      word-wrap: break-word;
+      white-space: pre-wrap;
+    }
+
+    .msg a {
+      display: inline-block;
+      margin-top: 6px;
+      color: #a78bfa;
+      text-decoration: underline;
+    }
+
+    .user { text-align: right; color: #ffffff; }
+    .bot  { text-align: left;  color: #a78bfa; }
+
+    .footer {
+      display: flex;
+      gap: 5px;
+    }
+
+    input {
+      flex: 1;
+      padding: 10px;
+      border-radius: 6px;
+      border: none;
+      font-size: 16px;
+      outline: none;
+    }
+
+    button {
+      padding: 10px 18px;
+      border: none;
+      background: #7b61ff;
+      color: white;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+
+    .status {
+      font-size: 12px;
+      color: #9ca3af;
+      margin-top: 8px;
+      min-height: 16px;
+    }
+
+    @media (max-width: 768px) {
+      body { padding: 16px; }
+      .chat { width: 100%; }
+      .avatar-wrap img { width: 220px; height: 220px; }
+      .messages { height: 320px; }
+      .msg { font-size: 16px; }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="chat">
+    <div class="avatar-wrap">
+      <img src="{{ url_for('static', filename='neutre_femme.webp') }}" alt="Betty" />
+    </div>
+
+    <div id="messages" class="messages">
+      <div class="msg bot">Bonjour 🙂 Dites-moi ce que vous cherchez.</div>
+    </div>
+
+    <div class="footer">
+      <input id="input" placeholder="Écrivez votre message…" />
+      <button id="send" type="button">Envoyer</button>
+    </div>
+
+    <div id="status" class="status"></div>
+  </div>
+
+  <script>
+    // 🔥 Fonction pour rendre les liens cliquables
+    function formatMessage(text) {
+      const urlRegex = /(https?:\/\/[^\s<]+)/g;
+
+      return text.replace(urlRegex, url => {
+        // 🔥 Nettoyage des caractères parasites à la fin
+        const cleanUrl = url.replace(/[>.,)]+$/, "");
+
+        return `<a href="${cleanUrl}" target="_blank">${cleanUrl}</a>`;
+      });
+    }
+
+    async function send() {
+      const input    = document.getElementById("input");
+      const messages = document.getElementById("messages");
+      const status   = document.getElementById("status");
+
+      const text = input.value.trim();
+      if (!text) return;
+
+      messages.innerHTML += `<div class="msg user">${text}</div>`;
+      input.value = "";
+      status.textContent = "Betty réfléchit…";
+      messages.scrollTop = messages.scrollHeight;
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text })
+        });
+
+        const raw = await res.text();
+        let data;
+        try { data = JSON.parse(raw); }
+        catch { throw new Error("Réponse non JSON : " + raw); }
+
+        if (!res.ok) throw new Error(data.reply || data.response || "Erreur serveur");
+
+        messages.innerHTML += `<div class="msg bot">${formatMessage(data.response)}</div>`;
+        status.textContent = "";
+
+      } catch (e) {
+        console.error("Erreur chat :", e);
+        messages.innerHTML += `<div class="msg bot">Petit souci technique…</div>`;
+        status.textContent = String(e.message || e);
+      }
+
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    document.getElementById("send").addEventListener("click", send);
+    document.getElementById("input").addEventListener("keydown", e => {
+      if (e.key === "Enter") send();
+    });
+  </script>
+</body>
+</html>
