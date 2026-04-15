@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>Betty Demo</title>
@@ -13,7 +13,7 @@
       font-family: Arial, sans-serif;
       display: flex;
       justify-content: center;
-      padding: 40px;
+      padding: 20px;
       margin: 0;
     }
 
@@ -29,18 +29,19 @@
     .avatar-wrap {
       display: flex;
       justify-content: center;
-      margin-bottom: 20px;
+      margin-bottom: 16px;
     }
 
     .avatar-wrap img {
-      width: 320px;
-      height: 320px;
+      width: 160px;
+      height: 160px;
       object-fit: cover;
+      border-radius: 8px;
       display: block;
     }
 
     .messages {
-      height: 400px;
+      height: 260px;
       overflow-y: auto;
       margin-bottom: 10px;
       padding-right: 4px;
@@ -48,15 +49,15 @@
 
     .msg {
       margin: 8px 0;
-      line-height: 1.4;
-      font-size: 18px;
+      line-height: 1.5;
+      font-size: 15px;
       word-wrap: break-word;
       white-space: pre-wrap;
     }
 
     .msg a {
       display: inline-block;
-      margin-top: 6px;
+      margin-top: 4px;
       color: #a78bfa;
       text-decoration: underline;
     }
@@ -64,17 +65,14 @@
     .user { text-align: right; color: #ffffff; }
     .bot  { text-align: left;  color: #a78bfa; }
 
-    .footer {
-      display: flex;
-      gap: 5px;
-    }
+    .footer { display: flex; gap: 5px; }
 
     input {
       flex: 1;
       padding: 10px;
       border-radius: 6px;
       border: none;
-      font-size: 16px;
+      font-size: 15px;
       outline: none;
     }
 
@@ -85,22 +83,23 @@
       color: white;
       border-radius: 6px;
       cursor: pointer;
-      font-size: 16px;
+      font-size: 15px;
     }
+    button:disabled { background: #4b5563; cursor: not-allowed; }
 
     .status {
       font-size: 12px;
       color: #9ca3af;
-      margin-top: 8px;
+      margin-top: 6px;
       min-height: 16px;
     }
 
     @media (max-width: 768px) {
-      body { padding: 16px; }
+      body { padding: 10px; }
       .chat { width: 100%; }
-      .avatar-wrap img { width: 220px; height: 220px; }
-      .messages { height: 320px; }
-      .msg { font-size: 16px; }
+      .avatar-wrap img { width: 120px; height: 120px; }
+      .messages { height: 220px; }
+      .msg { font-size: 14px; }
     }
   </style>
 </head>
@@ -112,27 +111,28 @@
     </div>
 
     <div id="messages" class="messages">
-      <div class="msg bot">Hi 🙂 are you trying to get more clients or more leads from your website?</div>
+      <div class="msg bot">Hi 🙂 What kind of business are you in?</div>
     </div>
 
     <div class="footer">
-      <input id="input" placeholder="Écrivez votre message…" />
-      <button id="send" type="button">Envoyer</button>
+      <input id="input" placeholder="Write your message…" autocomplete="off" />
+      <button id="send" type="button">Send</button>
     </div>
 
     <div id="status" class="status"></div>
   </div>
 
   <script>
-    // 🔥 Fonction pour rendre les liens cliquables
+    const history = [];
+
     function formatMessage(text) {
-      const urlRegex = /(https?:\/\/[^\s<]+)/g;
-
-      return text.replace(urlRegex, url => {
-        // 🔥 Nettoyage des caractères parasites à la fin
-        const cleanUrl = url.replace(/[>.,)]+$/, "");
-
-        return `<a href="${cleanUrl}" target="_blank">${cleanUrl}</a>`;
+      const escaped = text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      return escaped.replace(/(https?:\/\/[^\s<]+)/g, url => {
+        const clean = url.replace(/[>.,)&]+$/, "");
+        return `<a href="${clean}" target="_blank" rel="noopener">${clean}</a>`;
       });
     }
 
@@ -140,38 +140,48 @@
       const input    = document.getElementById("input");
       const messages = document.getElementById("messages");
       const status   = document.getElementById("status");
+      const btn      = document.getElementById("send");
 
-      const text = input.value.trim();
-      if (!text) return;
+      const message = input.value.trim();
+      if (!message) return;
 
-      messages.innerHTML += `<div class="msg user">${text}</div>`;
+      messages.innerHTML += `<div class="msg user">${formatMessage(message)}</div>`;
       input.value = "";
-      status.textContent = "Betty réfléchit…";
+      input.disabled = true;
+      btn.disabled   = true;
+      status.textContent = "Betty is thinking…";
       messages.scrollTop = messages.scrollHeight;
 
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text })
+          body: JSON.stringify({ message, history })
         });
 
         const raw = await res.text();
         let data;
         try { data = JSON.parse(raw); }
-        catch { throw new Error("Réponse non JSON : " + raw); }
+        catch { throw new Error("Non-JSON response: " + raw); }
 
-        if (!res.ok) throw new Error(data.reply || data.response || "Erreur serveur");
+        if (!res.ok) throw new Error(data.error || data.detail || "Server error " + res.status);
 
-        messages.innerHTML += `<div class="msg bot">${formatMessage(data.response)}</div>`;
-        status.textContent = "";
+        const reply = data.response || "";
+        history.push({ role: "user",      content: message });
+        history.push({ role: "assistant", content: reply   });
+
+        messages.innerHTML += `<div class="msg bot">${formatMessage(reply)}</div>`;
+        status.textContent = data.lead_captured ? "✅ Your details have been sent." : "";
 
       } catch (e) {
-        console.error("Erreur chat :", e);
-        messages.innerHTML += `<div class="msg bot">Petit souci technique…</div>`;
+        console.error("Chat error:", e);
+        messages.innerHTML += `<div class="msg bot">Small technical hiccup — please try again 🙂</div>`;
         status.textContent = String(e.message || e);
       }
 
+      input.disabled = false;
+      btn.disabled   = false;
+      input.focus();
       messages.scrollTop = messages.scrollHeight;
     }
 
