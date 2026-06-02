@@ -49,10 +49,14 @@ def providers():
 
 # ─── Anti-leak guard: no technical term ever reaches the visitor ────
 _LEAK_RE = re.compile(
-    r"(together\s*ai|hiccup|traceback|stack\s*trace|\bexception\b|status\s*code|"
-    r"payment\s*required|insufficient\s*(?:credit|fund)|"
-    r"technical\s*(?:error|issue|problem|difficult)|api\s*(?:error|key)|"
-    r"server\s*(?:error|issue|down)|rate\s*limit|\b(?:401|402|403|429|500|502|503)\b)",
+    r"(together\s*ai|hiccup|traceback|stack\s*trace|\bexception\b"
+    r"|payment\s*required|insufficient\s*(?:credit|fund)|rate\s*limit"
+    r"|technical\s*(?:error|issue|problem|difficult)|\bapi\s*(?:error|key)\b"
+    r"|server\s*(?:error|issue|down)"
+    # Codes d'erreur HTTP uniquement quand ils accompagnent un mot d'erreur,
+    # pour ne JAMAIS étouffer une vraie réponse LLM contenant un nombre ($500, 402 clients…).
+    r"|(?:error|status|code|http)\s*[:#]?\s*(?:401|402|403|404|429|500|502|503)\b"
+    r"|\b(?:401|402|403|404|429|500|502|503)\s*(?:error|payment))",
     re.IGNORECASE,
 )
 SAFE_FALLBACK = "I'd love to help you with that! 🙂 Could you share your name and the best email to reach you?"
@@ -116,30 +120,84 @@ def find_business(t):
     return ""
 
 
+NON_NAMES = {"i", "im", "a", "an", "the", "my", "me", "you", "we", "it", "its", "yes", "yeah",
+             "yep", "ok", "okay", "sure", "no", "nope", "maybe", "thanks", "thank", "hi", "hello",
+             "hey", "please", "well", "so", "and", "but", "just", "here", "there"}
+
+
+def is_greeting(t):
+    return _norm(t) in GREETINGS
+
+
+def detect_ask(text):
+    """Quel champ la question précédente de Betty visait-elle ?"""
+    t = (text or "").lower()
+    if "your name" in t or "who am i chatting" in t or "may i ask your name" in t or "first name" in t:
+        return "name"
+    if "email" in t:
+        return "email"
+    if "phone" in t:
+        return "phone"
+    if "business" in t or "industry" in t:
+        return "business"
+    if "looking to" in t or "what do you need" in t or "what brings you" in t:
+        return "need"
+    return None
+
+
+def bare_name(text):
+    """Un nom donné seul ('vincent', 'vincent bastille') quand Betty a demandé le nom."""
+    if find_email(text) or find_phone(text):
+        return ""
+    words = re.findall(r"[A-Za-zÀ-ÿ'\-]+", text)
+    if not words or len(words) > 2:
+        return ""
+    for w in words:
+        if _norm(w) not in NON_NAMES and _norm(w) not in GREETINGS and len(w) >= 2:
+            return w.capitalize()
+    return ""
+
+
 def strip_capture(text):
     return re.sub(r"\s*CAPTURE:.*$", "", str(text or ""), flags=re.IGNORECASE | re.DOTALL).strip()
 
 
 def rebuild_lead(history, message):
-    """Reconstruit le lead à partir de tout l'historique (stateless serverless)."""
+    """Reconstruit le lead à partir de TOUT l'historique (stateless serverless).
+    Tient compte de ce que Betty vient de demander pour capter les réponses
+    courtes : 'vincent' juste après 'what's your name?' => name=Vincent."""
     lead = {"name": "", "email": "", "phone": "", "business": "", "need": ""}
-    # 1) marqueurs CAPTURE émis par Betty (signal le plus fiable)
-    for m in history:
-        if m.get("role") == "assistant":
-            cap = CAPTURE_RE.search(m.get("content", "") or "")
+    seq = [(m.get("role"), m.get("content", "") or "")
+           for m in history if m.get("role") in ("user", "assistant")]
+    if message:
+        seq.append(("user", message))
+
+    last_ask = None  # champ demandé par le dernier message de Betty
+    for role, content in seq:
+        if role == "assistant":
+            cap = CAPTURE_RE.search(content)
             if cap:
-                if cap.group(1).strip(): lead["name"] = cap.group(1).strip()
+                if cap.group(1).strip(): lead["name"]  = cap.group(1).strip()
                 if cap.group(2).strip(): lead["email"] = cap.group(2).strip()
                 if cap.group(3).strip(): lead["phone"] = cap.group(3).strip()
-    # 2) messages du visiteur (regex tolérant)
-    user_texts = [m.get("content", "") for m in history if m.get("role") == "user"]
-    if message:
-        user_texts.append(message)
-    for t in user_texts:
-        lead["email"]    = lead["email"]    or find_email(t)
-        lead["phone"]    = lead["phone"]    or find_phone(t)
-        lead["name"]     = lead["name"]     or find_name(t)
-        lead["business"] = lead["business"] or find_business(t)
+            last_ask = detect_ask(content)
+            continue
+
+        # role == "user" — extraction regex (toujours active)
+        if not lead["email"]:    lead["email"]    = find_email(content)
+        if not lead["phone"]:    lead["phone"]    = find_phone(content)
+        if not lead["name"]:     lead["name"]     = find_name(content)
+        if not lead["business"]: lead["business"] = find_business(content)
+
+        # Capture CONTEXTUELLE des réponses courtes à une question précise
+        if last_ask and not is_negative(content) and not is_greeting(content):
+            if last_ask == "name" and not lead["name"]:
+                lead["name"] = bare_name(content)
+            elif last_ask == "business" and not lead["business"] and len(content.split()) <= 8:
+                lead["business"] = content.strip()[:80]
+            elif last_ask == "need" and not lead["need"]:
+                lead["need"] = content.strip()[:120]
+        last_ask = None  # consommé
     return lead
 
 
@@ -151,21 +209,26 @@ def _last_bot(history):
 
 
 def fallback_reply(lead, history, message):
-    """LLM indisponible -> on poursuit la capture, proprement, en anglais."""
+    """LLM indisponible -> Betty poursuit la qualification, naturellement, en
+    anglais, en s'appuyant sur ce qui est DÉJÀ connu (jamais 2x la même question)."""
     name = lead["name"]
     nm = f", {name}" if name else ""
     last_bot = _last_bot(history)
+    bot_all = " ".join((m.get("content", "") or "") for m in history if m.get("role") == "assistant").lower()
     neg = is_negative(message)
 
     if not lead["name"]:
         if neg and "name" in last_bot:
-            return "No worries! 🙂 What's the best email or phone to reach you, then?"
-        return "I'd love to help with that! 🙂 First, who am I chatting with — what's your name?"
+            return "No worries — what's the best email or phone to reach you on, then? 🙂"
+        return "Happy to help! 🙂 I'm Betty — what's your name?"
+    # On ne demande le secteur qu'une seule fois.
+    if not lead["business"] and "business" not in bot_all and "industry" not in bot_all:
+        return f"Great to meet you{nm}! 🙂 What kind of business are you in?"
     if not lead["email"] and not lead["phone"]:
-        if neg and ("email" in last_bot or "phone" in last_bot or "reach you" in last_bot):
-            return f"All good{nm} — if you'd like, just drop your email anytime and our team will follow up. What would you like to know about MyBetty?"
-        return f"Great to meet you{nm}! What's the best email or phone so we can send you the details?"
-    return f"Perfect{nm}, I've noted your details — our team will reach out to you very soon. 🙌\n{SIGNUP_LINK}"
+        if neg:
+            return f"No problem{nm} — whenever you're ready, just drop your email here and our team will follow up. Anything you'd like to know about MyBetty?"
+        return f"Love it{nm} — what's the best email or phone so our team can reach out to you?"
+    return f"Perfect{nm}, I've got what I need! 🙌 Our team will reach out to you very soon.\n{SIGNUP_LINK}"
 
 
 # ─── Lead delivery (Mailjet) ───────────────────────────────────────
@@ -239,14 +302,35 @@ def healthz():
     return "ok", 200
 
 
+def _ping_first_provider():
+    """Diagnostic : renvoie le statut HTTP du 1er provider (aucune clé exposée)."""
+    provs = providers()
+    if not provs:
+        return {"error": "no_provider_key_set"}
+    p = provs[0]
+    try:
+        r = requests.post(
+            p["url"],
+            headers={"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"},
+            json={"model": p["model"], "max_tokens": 5, "messages": [{"role": "user", "content": "ping"}]},
+            timeout=15,
+        )
+        return {"provider": p["name"], "model": p["model"], "http": r.status_code, "ok": bool(r.ok)}
+    except Exception as e:
+        return {"provider": p["name"], "model": p["model"], "error": type(e).__name__}
+
+
 @app.route("/api/debug")
 def debug():
-    return jsonify({
+    info = {
         "pack_exists": os.path.exists(YAML_PATH),
         "providers":   [p["name"] for p in providers()],
         "mj_set":      bool(os.environ.get("MJ_APIKEY_PUBLIC") and os.environ.get("MJ_APIKEY_PRIVATE")),
         "model":       os.environ.get("LLM_MODEL", "deepseek-ai/DeepSeek-V3"),
-    })
+    }
+    if request.args.get("ping") == "1":
+        info["llm_check"] = _ping_first_provider()
+    return jsonify(info)
 
 
 @app.route("/api/chat", methods=["POST"])

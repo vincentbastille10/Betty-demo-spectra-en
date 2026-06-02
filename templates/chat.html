@@ -123,7 +123,8 @@
   </div>
 
   <script>
-    const history = [];
+    // Seed with Betty's opening line so the server has full context from turn 1.
+    const history = [{ role: "assistant", content: "Hi 🙂 What kind of business are you in?" }];
 
     // If the backend ever fails, Betty keeps her mission going — she quietly
     // continues lead capture. No technical word ever reaches the visitor.
