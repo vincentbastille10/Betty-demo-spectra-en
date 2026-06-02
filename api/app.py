@@ -29,12 +29,30 @@ def load_prompt():
 
 
 # ─── LLM providers (Together -> Groq -> OpenAI-compatible) ──────────
+# Modèles Together connus comme valides : si LLM_MODEL est mal configuré
+# (slug déprécié -> HTTP 400), Betty bascule automatiquement sur ceux-ci,
+# pour qu'une vraie réponse LLM reste possible sans toucher aux env vars.
+TOGETHER_FALLBACK_MODELS = [
+    "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "meta-llama/Llama-3.1-8B-Instruct-Turbo",
+    "Qwen/Qwen2.5-7B-Instruct-Turbo",
+]
+
+
 def providers():
     provs = []
     tog = os.environ.get("TOGETHER_API_KEY", "").strip()
     if tog:
-        provs.append({"name": "together", "url": "https://api.together.xyz/v1/chat/completions",
-                      "key": tog, "model": os.environ.get("LLM_MODEL", "deepseek-ai/DeepSeek-V3")})
+        models = []
+        env_model = os.environ.get("LLM_MODEL", "").strip()
+        if env_model:
+            models.append(env_model)
+        for mdl in TOGETHER_FALLBACK_MODELS:
+            if mdl not in models:
+                models.append(mdl)
+        for mdl in models:
+            provs.append({"name": "together", "url": "https://api.together.xyz/v1/chat/completions",
+                          "key": tog, "model": mdl})
     grq = os.environ.get("GROQ_API_KEY", "").strip()
     if grq:
         provs.append({"name": "groq", "url": "https://api.groq.com/openai/v1/chat/completions",
@@ -277,7 +295,7 @@ def call_llm(system_prompt, history, message):
                 p["url"],
                 headers={"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"},
                 json={"model": p["model"], "max_tokens": max_tokens, "temperature": 0.6, "messages": msgs},
-                timeout=25,
+                timeout=15,
             )
             if not r.ok:
                 app.logger.warning("provider %s -> HTTP %s", p["name"], r.status_code)
@@ -302,22 +320,28 @@ def healthz():
     return "ok", 200
 
 
-def _ping_first_provider():
-    """Diagnostic : renvoie le statut HTTP du 1er provider (aucune clé exposée)."""
-    provs = providers()
-    if not provs:
-        return {"error": "no_provider_key_set"}
-    p = provs[0]
+def _ping_one(p, model=None):
+    mdl = model or p["model"]
     try:
         r = requests.post(
             p["url"],
             headers={"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"},
-            json={"model": p["model"], "max_tokens": 5, "messages": [{"role": "user", "content": "ping"}]},
+            json={"model": mdl, "max_tokens": 1, "messages": [{"role": "user", "content": "ping"}]},
             timeout=15,
         )
-        return {"provider": p["name"], "model": p["model"], "http": r.status_code, "ok": bool(r.ok)}
+        return {"provider": p["name"], "model": mdl, "http": r.status_code, "ok": bool(r.ok)}
     except Exception as e:
-        return {"provider": p["name"], "model": p["model"], "error": type(e).__name__}
+        return {"provider": p["name"], "model": mdl, "error": type(e).__name__}
+
+
+def _ping_providers(model=None):
+    """Diagnostic : statut HTTP de chaque modèle candidat (aucune clé exposée)."""
+    provs = providers()
+    if not provs:
+        return [{"error": "no_provider_key_set"}]
+    if model:  # sonde un slug précis sur le 1er provider
+        return [_ping_one(provs[0], model)]
+    return [_ping_one(p) for p in provs]
 
 
 @app.route("/api/debug")
@@ -326,10 +350,10 @@ def debug():
         "pack_exists": os.path.exists(YAML_PATH),
         "providers":   [p["name"] for p in providers()],
         "mj_set":      bool(os.environ.get("MJ_APIKEY_PUBLIC") and os.environ.get("MJ_APIKEY_PRIVATE")),
-        "model":       os.environ.get("LLM_MODEL", "deepseek-ai/DeepSeek-V3"),
+        "model_env":   os.environ.get("LLM_MODEL", "(unset)"),
     }
     if request.args.get("ping") == "1":
-        info["llm_check"] = _ping_first_provider()
+        info["llm_check"] = _ping_providers(request.args.get("model"))
     return jsonify(info)
 
 
