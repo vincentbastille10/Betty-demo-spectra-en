@@ -125,6 +125,21 @@
   <script>
     const history = [];
 
+    // If the backend ever fails, Betty keeps her mission going — she quietly
+    // continues lead capture. No technical word ever reaches the visitor.
+    const OFFLINE_PROMPTS = [
+      "I'd love to help with that! 🙂 First, what's your name?",
+      "Great — and what's the best email to reach you?",
+      "Perfect. A phone number too, in case it's easier to call? (optional 🙂)",
+      "Got it! In a few words, what are you looking to get done?",
+      "Thanks so much — our team will get back to you very soon. 🙌"
+    ];
+    let offlineStep = 0;
+
+    function looksLikeError(t) {
+      return /together\s*ai|hiccup|traceback|exception|status\s*code|payment\s*required|insufficient\s*(credit|fund)|technical\s*(error|issue|problem)|api\s*(error|key)|server\s*(error|issue|down)|rate\s*limit|\b(401|402|403|429|500|502|503)\b/i.test(String(t || ""));
+    }
+
     function formatMessage(text) {
       const escaped = text
         .replace(/&/g, "&amp;")
@@ -152,32 +167,36 @@
       status.textContent = "Betty is thinking…";
       messages.scrollTop = messages.scrollHeight;
 
+      let reply = "";
+      let leadCaptured = false;
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message, history })
         });
-
-        const raw = await res.text();
-        let data;
-        try { data = JSON.parse(raw); }
-        catch { throw new Error("Non-JSON response: " + raw); }
-
-        if (!res.ok) throw new Error(data.error || data.detail || "Server error " + res.status);
-
-        const reply = data.response || "";
-        history.push({ role: "user",      content: message });
-        history.push({ role: "assistant", content: reply   });
-
-        messages.innerHTML += `<div class="msg bot">${formatMessage(reply)}</div>`;
-        status.textContent = data.lead_captured ? "✅ Your details have been sent." : "";
-
+        const data = await res.json().catch(() => ({}));
+        reply        = (data && data.response) ? data.response : "";
+        leadCaptured = !!(data && data.lead_captured);
       } catch (e) {
-        console.error("Chat error:", e);
-        messages.innerHTML += `<div class="msg bot">Small technical hiccup — please try again 🙂</div>`;
-        status.textContent = String(e.message || e);
+        // Never surface technical errors to the visitor.
+        reply = "";
       }
+
+      // Empty or error-like => keep the conversation going seamlessly.
+      if (!reply || looksLikeError(reply)) {
+        reply = OFFLINE_PROMPTS[Math.min(offlineStep, OFFLINE_PROMPTS.length - 1)];
+        offlineStep++;
+        leadCaptured = false;
+      } else {
+        offlineStep = 0;
+      }
+
+      history.push({ role: "user",      content: message });
+      history.push({ role: "assistant", content: reply   });
+
+      messages.innerHTML += `<div class="msg bot">${formatMessage(reply)}</div>`;
+      status.textContent = leadCaptured ? "✅ Your details have been sent." : "";
 
       input.disabled = false;
       btn.disabled   = false;
