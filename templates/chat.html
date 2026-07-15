@@ -123,17 +123,32 @@
   </div>
 
   <script>
-    // Seed with Betty's opening line so the server has full context from turn 1.
-    const history = [{ role: "assistant", content: "Hi 🙂 What kind of business are you in?" }];
+    const mode = new URLSearchParams(window.location.search).get("mode") === "real-estate"
+      ? "real-estate"
+      : "generic";
+    const opening = mode === "real-estate"
+      ? "Hi! I'm Betty, a virtual receptionist for real estate agents. For this demo, are you looking to buy, sell, invest, or request a home valuation?"
+      : "Hi! 🙂 To make this demo useful, what kind of business are you in?";
 
-    // If the backend ever fails, Betty keeps her mission going — she quietly
-    // continues lead capture. No technical word ever reaches the visitor.
-    const OFFLINE_PROMPTS = [
-      "I'd love to help with that! 🙂 First, what's your name?",
-      "Great — and what's the best email to reach you?",
-      "Perfect. A phone number too, in case it's easier to call? (optional 🙂)",
-      "Got it! In a few words, what are you looking to get done?",
-      "Thanks so much — our team will get back to you very soon. 🙌"
+    document.querySelector("#messages .bot").textContent = opening;
+    const history = [{ role: "assistant", content: opening }];
+
+    const OFFLINE_PROMPTS = mode === "real-estate" ? [
+      "Are you looking to buy, sell, invest, or request a home valuation?",
+      "Which city or neighborhood is your real estate project in?",
+      "What property type are you interested in?",
+      "What price range or estimated property value should the agent know?",
+      "When would you ideally like to move forward?",
+      "Perfect — what's your first name?",
+      "What's the best email or mobile number for a local agent to reach you?",
+      "Thanks! This is the qualified lead summary the agent would receive instantly."
+    ] : [
+      "What kind of business are you in?",
+      "What do you need Betty to qualify or capture: quote requests, appointments, sales inquiries, registrations, or something else?",
+      "What's the most useful detail to qualify first — service needed, location, budget, timeline, or urgency?",
+      "Perfect — what's your first name?",
+      "What's the best email or mobile number for our team to send your activation details?",
+      "Thanks! This is the qualified summary the business owner would receive instantly."
     ];
     let offlineStep = 0;
 
@@ -174,7 +189,7 @@
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, history })
+          body: JSON.stringify({ message, history, mode })
         });
         const data = await res.json().catch(() => ({}));
         reply        = (data && data.response) ? data.response : "";
