@@ -75,33 +75,20 @@ TOGETHER_FALLBACK_MODELS = [
 
 
 def providers():
-    # Deterministic fallback is the default: no provider cost unless explicitly enabled.
-    llm_enabled = os.environ.get("DEMO_LLM_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
-    if not llm_enabled:
+    """Together est prioritaire dès qu'une clé existe.
+    Sans clé, ou si Together échoue, le parcours déterministe prend le relais."""
+    key = os.environ.get("TOGETHER_API_KEY", "").strip()
+    if not key:
         return []
-    provs = []
-    tog = os.environ.get("TOGETHER_API_KEY", "").strip()
-    if tog:
-        models = []
-        env_model = os.environ.get("LLM_MODEL", "").strip()
-        if env_model:
-            models.append(env_model)
-        for mdl in TOGETHER_FALLBACK_MODELS:
-            if mdl not in models:
-                models.append(mdl)
-        for mdl in models:
-            provs.append({"name": "together", "url": "https://api.together.xyz/v1/chat/completions",
-                          "key": tog, "model": mdl})
-    grq = os.environ.get("GROQ_API_KEY", "").strip()
-    if grq:
-        provs.append({"name": "groq", "url": "https://api.groq.com/openai/v1/chat/completions",
-                      "key": grq, "model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")})
-    oai = os.environ.get("OPENAI_API_KEY", "").strip()
-    if oai:
-        base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        provs.append({"name": "openai", "url": base + "/chat/completions",
-                      "key": oai, "model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini")})
-    return provs
+    model = os.environ.get(
+        "LLM_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+    ).strip()
+    return [{
+        "name": "together",
+        "url": "https://api.together.xyz/v1/chat/completions",
+        "key": key,
+        "model": model,
+    }]
 
 
 # ─── Anti-leak guard: no technical term ever reaches the visitor ────
@@ -116,7 +103,7 @@ _LEAK_RE = re.compile(
     r"|\b(?:401|402|403|404|429|500|502|503)\s*(?:error|payment))",
     re.IGNORECASE,
 )
-SAFE_FALLBACK = "I'd love to help you with that! 🙂 Could you share your name and the best email to reach you?"
+SAFE_FALLBACK = "Hi! 🙂 To make this demo useful, what kind of business are you in?"
 
 
 def looks_like_error(text):
@@ -552,7 +539,13 @@ def chat():
     except Exception as e:
         # Dernier rempart : message propre, capture du lead, zéro fuite.
         app.logger.warning("chat fatal: %r", e)
-        return jsonify({"response": SAFE_FALLBACK, "lead_captured": False})
+        safe_reply = (
+            "Hi! I'm Betty, a virtual receptionist for real estate agents. "
+            "Are you looking to buy, sell, invest, or request a home valuation?"
+            if locals().get("mode") == "real-estate"
+            else SAFE_FALLBACK
+        )
+        return jsonify({"response": safe_reply, "lead_captured": False})
 
 
 if __name__ == "__main__":
