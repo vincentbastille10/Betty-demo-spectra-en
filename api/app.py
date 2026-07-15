@@ -19,8 +19,43 @@ DEFAULT_PROMPT = (
     "Never mention anything technical."
 )
 
+REAL_ESTATE_PROMPT = """
+You are Betty, a warm, natural virtual receptionist for a US real estate agent.
+This is a live product demonstration: the visitor should experience how Betty qualifies a real buyer, seller, investor, or valuation request.
 
-def load_prompt():
+Your goal is to understand the real estate project before asking for contact details.
+Ask exactly one short question at a time and reply in natural American English.
+
+FLOW:
+1. Explain the demo context, then ask whether the visitor wants to buy, sell, invest, or request a home valuation.
+2. Ask for the city or neighborhood.
+3. Ask for the property type.
+4. Ask for the budget, price range, or estimated property value, depending on intent.
+5. Ask when they plan to move, invest, or sell.
+6. Only after those useful details, ask for their first name.
+7. Ask for one preferred contact method: email OR mobile number.
+8. Confirm with a concise qualified lead summary and explain that this is what the agent receives instantly.
+9. Finish with https://MyBetty.online/real-estate
+
+RULES:
+- Never ask what kind of business they are in.
+- Never ask for contact details before collecting useful real estate context.
+- Never request both email and phone; one is enough.
+- Answer a visitor's direct question before continuing qualification.
+- Never invent listings, prices, availability, or market facts.
+- Never say you are an AI.
+- Use 1 to 3 short sentences per turn.
+- Avoid artificial phrases such as 'Love it' after receiving a name.
+- MyBetty costs $149/month, includes a 7-day free trial, requires a card, and does not charge during the trial.
+- Setup takes approximately 3 minutes.
+- When contact information is captured, add as the final hidden line:
+  CAPTURE: name=[firstname] email=[email or empty] phone=[phone or empty]
+""".strip()
+
+
+def load_prompt(mode="generic"):
+    if mode == "real-estate":
+        return REAL_ESTATE_PROMPT
     try:
         with open(YAML_PATH, "r", encoding="utf-8") as f:
             return (yaml.safe_load(f) or {}).get("prompt", "").strip() or DEFAULT_PROMPT
@@ -40,6 +75,10 @@ TOGETHER_FALLBACK_MODELS = [
 
 
 def providers():
+    # Deterministic fallback is the default: no provider cost unless explicitly enabled.
+    llm_enabled = os.environ.get("DEMO_LLM_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+    if not llm_enabled:
+        return []
     provs = []
     tog = os.environ.get("TOGETHER_API_KEY", "").strip()
     if tog:
@@ -160,6 +199,8 @@ def detect_ask(text):
         return "business"
     if "looking to" in t or "what do you need" in t or "what brings you" in t:
         return "need"
+    if "most useful detail" in t or ("budget" in t and "timeline" in t) or "qualify first" in t:
+        return "qualifier"
     return None
 
 
@@ -184,7 +225,7 @@ def rebuild_lead(history, message):
     """Reconstruit le lead à partir de TOUT l'historique (stateless serverless).
     Tient compte de ce que Betty vient de demander pour capter les réponses
     courtes : 'vincent' juste après 'what's your name?' => name=Vincent."""
-    lead = {"name": "", "email": "", "phone": "", "business": "", "need": ""}
+    lead = {"name": "", "email": "", "phone": "", "business": "", "need": "", "qualifier": ""}
     seq = [(m.get("role"), m.get("content", "") or "")
            for m in history if m.get("role") in ("user", "assistant")]
     if message:
@@ -215,6 +256,8 @@ def rebuild_lead(history, message):
                 lead["business"] = content.strip()[:80]
             elif last_ask == "need" and not lead["need"]:
                 lead["need"] = content.strip()[:120]
+            elif last_ask == "qualifier" and not lead["qualifier"]:
+                lead["qualifier"] = content.strip()[:120]
         last_ask = None  # consommé
     return lead
 
@@ -226,6 +269,88 @@ def _last_bot(history):
     return ""
 
 
+def detect_real_estate_ask(text):
+    t = (text or "").lower()
+    if ("buy" in t and "sell" in t) or "home valuation" in t:
+        return "intent"
+    if "city or neighborhood" in t or "area is the property" in t:
+        return "location"
+    if "property type" in t or "kind of property" in t:
+        return "property_type"
+    if "price range" in t or "estimated property value" in t or "rough value" in t:
+        return "budget"
+    if "when would" in t or "timeline" in t or "how soon" in t:
+        return "timeline"
+    return None
+
+
+def normalize_real_estate_intent(value):
+    n = _norm(value)
+    if "valu" in n or "worth" in n:
+        return "valuation"
+    if "sell" in n or "list" in n:
+        return "seller"
+    if "invest" in n:
+        return "investor"
+    if "rent" in n:
+        return "renter"
+    if "buy" in n or "purchas" in n:
+        return "buyer"
+    return value.strip()[:40] if value else ""
+
+
+def rebuild_real_estate_state(history, message):
+    state = {"intent": "", "location": "", "property_type": "", "budget": "", "timeline": ""}
+    seq = [(m.get("role"), m.get("content", "") or "")
+           for m in history if m.get("role") in ("user", "assistant")]
+    if message:
+        seq.append(("user", message))
+    last_ask = None
+    for role, content in seq:
+        if role == "assistant":
+            last_ask = detect_real_estate_ask(content)
+            continue
+        if last_ask and not is_greeting(content) and not is_negative(content):
+            value = content.strip()[:120]
+            if last_ask == "intent":
+                value = normalize_real_estate_intent(value)
+            if value:
+                state[last_ask] = value
+        last_ask = None
+    return state
+
+
+def fallback_real_estate_reply(lead, state):
+    name = lead.get("name", "")
+    if not state["intent"]:
+        return ("Hi! I'm Betty, a virtual receptionist for real estate agents. "
+                "For this demo, are you looking to buy, sell, invest, or request a home valuation?")
+    if not state["location"]:
+        return "Great — which city or neighborhood is your real estate project in?"
+    if not state["property_type"]:
+        return "What property type are you interested in — house, condo, apartment, land, or something else?"
+    if not state["budget"]:
+        if state["intent"] in ("seller", "valuation"):
+            return "Do you have a rough estimate of the property's current value?"
+        return "What price range are you considering?"
+    if not state["timeline"]:
+        return "When would you ideally like to move forward?"
+    if not name:
+        return "Perfect — I now have useful context for the agent. What's your first name?"
+    if not lead.get("email") and not lead.get("phone"):
+        return f"Thanks, {name}. What's the best email or mobile number for a local agent to reach you?"
+    label = state["intent"].replace("_", " ").title()
+    contact = lead.get("email") or lead.get("phone")
+    return (
+        f"Perfect, {name}! Here's the qualified lead summary the agent would receive instantly:\n"
+        f"• {label} · {state['location']} · {state['property_type']}\n"
+        f"• Budget/value: {state['budget']} · Timeline: {state['timeline']}\n"
+        f"• Contact: {contact}\n\n"
+        "That's how Betty turns an anonymous visitor into a ready-to-call lead — 24/7.\n"
+        "https://MyBetty.online/real-estate"
+    )
+
+
 def fallback_reply(lead, history, message):
     """LLM indisponible -> Betty poursuit la qualification, naturellement, en
     anglais, en s'appuyant sur ce qui est DÉJÀ connu (jamais 2x la même question)."""
@@ -235,18 +360,29 @@ def fallback_reply(lead, history, message):
     bot_all = " ".join((m.get("content", "") or "") for m in history if m.get("role") == "assistant").lower()
     neg = is_negative(message)
 
+    if not lead["business"]:
+        return "Hi! 🙂 To make this demo useful, what kind of business are you in?"
+    if not lead["need"]:
+        return ("Great — what do you need Betty to qualify or capture on your website: "
+                "quote requests, appointments, sales inquiries, registrations, or something else?")
+    if not lead["qualifier"]:
+        return ("What's the most useful detail to qualify first — service needed, location, "
+                "budget, timeline, or urgency?")
     if not lead["name"]:
-        if neg and "name" in last_bot:
-            return "No worries — what's the best email or phone to reach you on, then? 🙂"
-        return "Happy to help! 🙂 I'm Betty — what's your name?"
-    # On ne demande le secteur qu'une seule fois.
-    if not lead["business"] and "business" not in bot_all and "industry" not in bot_all:
-        return f"Great to meet you{nm}! 🙂 What kind of business are you in?"
+        return "Perfect — I now have useful context for your team. What's your first name?"
     if not lead["email"] and not lead["phone"]:
         if neg:
-            return f"No problem{nm} — whenever you're ready, just drop your email here and our team will follow up. Anything you'd like to know about MyBetty?"
-        return f"Love it{nm} — what's the best email or phone so our team can reach out to you?"
-    return f"Perfect{nm}, I've got what I need! 🙌 Our team will reach out to you very soon.\n{SIGNUP_LINK}"
+            return f"No problem{nm}. Your demo summary is ready whenever you'd like to continue."
+        return f"Thanks{nm}. What's the best email or mobile number for our team to send your activation details?"
+    contact = lead["email"] or lead["phone"]
+    return (
+        f"Perfect{nm}! Here's the qualified summary our team receives:\n"
+        f"• Business: {lead['business']}\n"
+        f"• Goal: {lead['need']}\n"
+        f"• Qualification: {lead['qualifier']}\n"
+        f"• Contact: {contact}\n\n"
+        f"That's exactly what your own visitors' conversations can produce.\n{SIGNUP_LINK}"
+    )
 
 
 # ─── Lead delivery (Mailjet) ───────────────────────────────────────
@@ -260,7 +396,14 @@ def send_lead_email(lead):
         f"Name    : {lead.get('name') or '-'}\n"
         f"Email   : {lead.get('email') or '-'}\n"
         f"Phone   : {lead.get('phone') or '-'}\n"
-        f"Business: {lead.get('business') or '-'}\n\n"
+        f"Business: {lead.get('business') or '-'}\n"
+        f"Goal    : {lead.get('need') or '-'}\n"
+        f"Qualify : {lead.get('qualifier') or '-'}\n"
+        f"Intent  : {lead.get('intent') or '-'}\n"
+        f"Location: {lead.get('location') or '-'}\n"
+        f"Property: {lead.get('property_type') or '-'}\n"
+        f"Budget  : {lead.get('budget') or '-'}\n"
+        f"Timeline: {lead.get('timeline') or '-'}\n\n"
         f"---\nCaptured via betty-demo-spectra-en.vercel.app"
     )
     try:
@@ -365,16 +508,25 @@ def chat():
         payload = request.get_json(silent=True) or {}
         message = (payload.get("message") or "").strip()
         history = payload.get("history") or []
+        mode = (payload.get("mode") or "generic").strip().lower()
+        if mode not in ("generic", "real-estate"):
+            mode = "generic"
         if not isinstance(history, list):
             history = []
 
         if not message:
-            return jsonify({"response": "Hi! 🙂 What kind of business are you in?", "lead_captured": False})
+            opening = ("Hi! I'm Betty, a virtual receptionist for real estate agents. "
+                       "For this demo, are you looking to buy, sell, invest, or request a home valuation?") \
+                      if mode == "real-estate" else "Hi! 🙂 To make this demo useful, what kind of business are you in?"
+            return jsonify({"response": opening, "lead_captured": False})
 
-        lead_before = rebuild_lead(history, "")       # état avant ce message
-        lead        = rebuild_lead(history, message)  # avec le message courant
+        lead_before = rebuild_lead(history, "")
+        lead        = rebuild_lead(history, message)
+        real_state = rebuild_real_estate_state(history, message) if mode == "real-estate" else {}
+        if real_state:
+            lead.update(real_state)
 
-        raw = call_llm(load_prompt(), history, message)
+        raw = call_llm(load_prompt(mode), history, message)
         if raw:
             cap = CAPTURE_RE.search(raw)
             if cap:
@@ -383,7 +535,8 @@ def chat():
                 if cap.group(3).strip(): lead["phone"] = cap.group(3).strip()
             reply = strip_capture(raw)
         else:
-            reply = fallback_reply(lead, history, message)
+            reply = (fallback_real_estate_reply(lead, real_state)
+                     if mode == "real-estate" else fallback_reply(lead, history, message))
 
         reply = ensure_clean(reply)
 
