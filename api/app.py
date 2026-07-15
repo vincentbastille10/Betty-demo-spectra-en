@@ -53,14 +53,93 @@ RULES:
 """.strip()
 
 
-def load_prompt(mode="generic"):
-    if mode == "real-estate":
-        return REAL_ESTATE_PROMPT
+def load_config():
     try:
         with open(YAML_PATH, "r", encoding="utf-8") as f:
-            return (yaml.safe_load(f) or {}).get("prompt", "").strip() or DEFAULT_PROMPT
+            return yaml.safe_load(f) or {}
     except Exception:
-        return DEFAULT_PROMPT
+        return {}
+
+
+def load_knowledge_base():
+    return load_config().get("knowledge_base", {}) or {}
+
+
+def _knowledge_for_prompt(mode):
+    lines = []
+    for entry in load_knowledge_base().get("entries", []):
+        modes = entry.get("modes") or ["generic", "real-estate"]
+        if mode in modes and entry.get("answer"):
+            lines.append(f"- {entry.get('id', 'fact')}: {entry['answer']}")
+    return "\n".join(lines)
+
+
+def load_prompt(mode="generic"):
+    config = load_config()
+    base = REAL_ESTATE_PROMPT if mode == "real-estate" else (
+        str(config.get("prompt") or "").strip() or DEFAULT_PROMPT
+    )
+    facts = _knowledge_for_prompt(mode)
+    if not facts:
+        return base
+    return (
+        base
+        + "\n\nVERIFIED KNOWLEDGE BASE — source of truth; never contradict or extend it:\n"
+        + facts
+    )
+
+
+def find_kb_answer(message, mode="generic"):
+    text = _norm(message)
+    if not text:
+        return ""
+    best = None
+    best_score = -1
+    base = load_knowledge_base()
+    for entry in base.get("entries", []):
+        modes = entry.get("modes") or ["generic", "real-estate"]
+        if mode not in modes:
+            continue
+        matched = [
+            trigger for trigger in entry.get("triggers", [])
+            if _norm(trigger) and _norm(trigger) in text
+        ]
+        if not matched:
+            continue
+        score = int(entry.get("priority", 0)) * 1000 + max(len(_norm(t)) for t in matched)
+        if score > best_score:
+            best = entry
+            best_score = score
+    if best:
+        return str(best.get("answer") or "").strip()
+
+    question_starts = (
+        "what ", "how ", "does ", "can ", "is ", "are ", "do ",
+        "tell me ", "i want to know ", "could you "
+    )
+    product_terms = ("betty", "mybetty", "chatbot", "assistant", "subscription", "service")
+    if (
+        any(term in text for term in product_terms)
+        and ("?" in str(message) or text.startswith(question_starts))
+    ):
+        return str(base.get("unknown_answer") or "").strip()
+    return ""
+
+
+def find_qualification_profile(activity):
+    text = _norm(activity)
+    if not text:
+        return {}
+    for profile in load_config().get("qualification_profiles", []):
+        if any(_norm(trigger) in text for trigger in profile.get("triggers", [])):
+            return profile
+    return {}
+
+
+def combine_knowledge_and_flow(answer, flow_reply):
+    answer = str(answer or "").strip()
+    flow_reply = str(flow_reply or "").strip()
+    return f"{answer}\n\n{flow_reply}" if answer else flow_reply
 
 
 # ─── LLM providers (Together -> Groq -> OpenAI-compatible) ──────────
@@ -186,7 +265,12 @@ def detect_ask(text):
         return "business"
     if "looking to" in t or "what do you need" in t or "what brings you" in t:
         return "need"
-    if "most useful detail" in t or ("budget" in t and "timeline" in t) or "qualify first" in t:
+    if (
+        "most useful detail" in t
+        or "which detail" in t
+        or ("budget" in t and "timeline" in t)
+        or "qualify first" in t
+    ):
         return "qualifier"
     return None
 
@@ -236,7 +320,11 @@ def rebuild_lead(history, message):
         if not lead["business"]: lead["business"] = find_business(content)
 
         # Capture CONTEXTUELLE des réponses courtes à une question précise
-        if last_ask and not is_negative(content) and not is_greeting(content):
+        knowledge_turn = bool(
+            find_kb_answer(content, "generic") or
+            find_kb_answer(content, "real-estate")
+        )
+        if last_ask and not is_negative(content) and not is_greeting(content) and not knowledge_turn:
             if last_ask == "name" and not lead["name"]:
                 lead["name"] = bare_name(content)
             elif last_ask == "business" and not lead["business"] and len(content.split()) <= 8:
@@ -297,7 +385,11 @@ def rebuild_real_estate_state(history, message):
         if role == "assistant":
             last_ask = detect_real_estate_ask(content)
             continue
-        if last_ask and not is_greeting(content) and not is_negative(content):
+        knowledge_turn = bool(
+            find_kb_answer(content, "generic") or
+            find_kb_answer(content, "real-estate")
+        )
+        if last_ask and not is_greeting(content) and not is_negative(content) and not knowledge_turn:
             value = content.strip()[:120]
             if last_ask == "intent":
                 value = normalize_real_estate_intent(value)
@@ -353,10 +445,16 @@ def fallback_reply(lead, history, message):
         return ("Great — what do you need Betty to qualify or capture on your website: "
                 "quote requests, appointments, sales inquiries, registrations, or something else?")
     if not lead["qualifier"]:
+        profile = find_qualification_profile(lead["business"])
+        if profile.get("question"):
+            return profile["question"]
         return ("What's the most useful detail to qualify first — service needed, location, "
                 "budget, timeline, or urgency?")
     if not lead["name"]:
-        return "Perfect — I now have useful context for your team. What's your first name?"
+        profile = find_qualification_profile(lead["business"])
+        value = str(profile.get("value") or "").strip()
+        prefix = f"{value} " if value else "Perfect — I now have useful context for your team. "
+        return prefix + "What's your first name?"
     if not lead["email"] and not lead["phone"]:
         if neg:
             return f"No problem{nm}. Your demo summary is ready whenever you'd like to continue."
@@ -507,9 +605,15 @@ def chat():
                       if mode == "real-estate" else "Hi! 🙂 To make this demo useful, what kind of business are you in?"
             return jsonify({"response": opening, "lead_captured": False})
 
+        knowledge_answer = find_kb_answer(message, mode)
+        qualification_message = "" if knowledge_answer else message
+
         lead_before = rebuild_lead(history, "")
-        lead        = rebuild_lead(history, message)
-        real_state = rebuild_real_estate_state(history, message) if mode == "real-estate" else {}
+        lead = rebuild_lead(history, qualification_message)
+        real_state = (
+            rebuild_real_estate_state(history, qualification_message)
+            if mode == "real-estate" else {}
+        )
         if real_state:
             lead.update(real_state)
 
@@ -522,8 +626,12 @@ def chat():
                 if cap.group(3).strip(): lead["phone"] = cap.group(3).strip()
             reply = strip_capture(raw)
         else:
-            reply = (fallback_real_estate_reply(lead, real_state)
-                     if mode == "real-estate" else fallback_reply(lead, history, message))
+            flow_reply = (
+                fallback_real_estate_reply(lead, real_state)
+                if mode == "real-estate"
+                else fallback_reply(lead, history, qualification_message)
+            )
+            reply = combine_knowledge_and_flow(knowledge_answer, flow_reply)
 
         reply = ensure_clean(reply)
 
