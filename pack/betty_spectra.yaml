@@ -30,7 +30,7 @@ knowledge_base:
     - id: pricing
       priority: 100
       modes: ["generic", "real-estate"]
-      triggers: ["how much does betty", "how much is betty", "what does betty cost", "monthly price", "subscription price", "pricing", "$149"]
+      triggers: ["how much does betty", "how much is betty", "what does betty cost", "monthly price", "subscription price", "pricing", "$149", "how much", "what does it cost", "what it costs", "cost", "price", "expensive", "per month", "how much do you charge"]
       answer: >-
         MyBetty is $149 per month for the US offer, with no long-term contract.
     - id: trial
