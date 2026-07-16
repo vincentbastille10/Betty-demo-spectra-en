@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, jsonify
-import requests, yaml, os, re
+import requests, yaml, os, re, time
 
 # ─── Paths ──────────────────────────────────────────────────────────
 BASE_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -537,6 +537,36 @@ def call_llm(system_prompt, history, message):
     return None  # aucun LLM -> bascule sur le fallback déterministe
 
 
+# ─── Garde-fou credits ─────────────────────────────────────────────
+# Cette demo est publique et sans authentification : chaque message coute un
+# appel LLM facture. Sans limite, un script qui boucle dessus vide le compte.
+# Au-dela du quota, on ne renvoie PAS d'erreur : on sert fallback_reply(), le
+# repli deterministe, qui est gratuit et capture toujours le lead. Un pirate
+# ne coute plus rien ; un vrai prospect a deja eu ses reponses IA.
+_HITS: dict = {}
+_MAX_LLM_PAR_IP = int(os.environ.get("DEMO_MAX_LLM_PAR_IP", "3"))
+_FENETRE_S = int(os.environ.get("DEMO_FENETRE_SECONDES", "600"))
+
+
+def _client_ip():
+    return ((request.headers.get("X-Forwarded-For", "").split(",")[0].strip())
+            or request.remote_addr or "?")
+
+
+def _llm_autorise(ip):
+    maintenant = time.time()
+    seuil = maintenant - _FENETRE_S
+    if len(_HITS) > 5000:      # borne memoire
+        _HITS.clear()
+    hits = [t for t in _HITS.get(ip, []) if t > seuil]
+    if len(hits) >= _MAX_LLM_PAR_IP:
+        _HITS[ip] = hits
+        return False
+    hits.append(maintenant)
+    _HITS[ip] = hits
+    return True
+
+
 # ─── Routes ────────────────────────────────────────────────────────
 @app.route("/")
 def home():
@@ -617,7 +647,12 @@ def chat():
         if real_state:
             lead.update(real_state)
 
-        raw = call_llm(load_prompt(mode), history, message)
+        ip = _client_ip()
+        if _llm_autorise(ip):
+            raw = call_llm(load_prompt(mode), history, message)
+        else:
+            raw = None   # quota epuise -> repli deterministe, gratuit
+            app.logger.warning("quota LLM depasse pour %s -> fallback", ip)
         if raw:
             cap = CAPTURE_RE.search(raw)
             if cap:
